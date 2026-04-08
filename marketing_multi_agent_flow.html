@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multi-Agent Marketing Optimization — System Flow</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --text: #e7ecf3;
+      --muted: #9aa8bc;
+      --accent: #3d9cf5;
+      --border: #2d3a4d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      line-height: 1.6;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 { font-size: 1.75rem; font-weight: 650; margin-bottom: 0.5rem; }
+    h2 {
+      font-size: 1.2rem;
+      margin-top: 2rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--accent);
+    }
+    h3 { font-size: 1.05rem; margin-top: 1.25rem; color: #c5d4e8; }
+    p { color: var(--text); margin: 0.75rem 0; }
+    .lead { color: var(--muted); font-size: 1.05rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      margin: 1rem 0;
+    }
+    code, pre {
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.88rem;
+    }
+    pre {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      overflow-x: auto;
+      color: #d8dee9;
+    }
+    ul { padding-left: 1.25rem; color: #d0dae8; }
+    li { margin: 0.35rem 0; }
+    a { color: var(--accent); }
+    .mermaid { background: #121a24; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      margin: 1rem 0;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 0.5rem 0.65rem;
+      text-align: left;
+    }
+    th { background: #243044; color: #e7ecf3; }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "dark" });
+  </script>
+</head>
+<body>
+
+  <h1>Multi-Agent Marketing Optimization System</h1>
+  <p class="lead">
+    This document describes how the OpenAI-based program in
+    <code>marketing_multi_agent_system.py</code> ingests CSV budget and performance
+    feeds, runs three channel specialist agents plus a supervisor orchestrator (and
+    an optional reflector), and produces <strong>weekly spend recommendations</strong>
+    that exhaust a fixed annual budget evenly across the year (total annual sum divided
+    by 52 weeks).
+  </p>
+
+  <h2>1. Business problem in one paragraph</h2>
+  <p>
+    Marketing runs paid Google Ads, LinkedIn campaigns, and email programs. Each week,
+    new performance rows arrive as CSV exports. Finance sets an annual budget (your
+    numbers live in <code>data/budget_allocation.csv</code>). The system must recommend
+    how much to <em>spend this week</em> on each channel such that the three amounts add
+    up exactly to the weekly envelope, while using recent performance to shift spend
+    toward stronger channels and away from weaker ones—without exceeding the annual
+    plan when repeated week over week.
+  </p>
+
+  <h2>2. Data inputs (four CSV files)</h2>
+  <div class="card">
+    <h3>2.1 Budget allocation (<code>data/budget_allocation.csv</code>)</h3>
+    <p>
+      One row per channel. Column <code>annual_budget_usd</code> is the annual dollars
+      assigned to that channel. The program sums all rows to get the <strong>total annual
+      budget</strong>, then computes <code>weekly_total = sum / 52</code>. Edit the CSV
+      to match your plan (for example, three rows that sum to 100,000 for a $100k year).
+    </p>
+    <table>
+      <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>campaign</code></td><td>google, linkedin, or email (case-insensitive)</td></tr>
+        <tr><td><code>annual_budget_usd</code></td><td>Annual allocation for that channel</td></tr>
+        <tr><td><code>notes</code></td><td>Optional; passed through for human context in prompts</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2.2 Google performance (<code>data/google_performance.csv</code>)</h3>
+    <p>
+      Weekly rows with typical paid search / PMax style metrics: impressions, clicks,
+      CTR, cost, conversions, conversion value, CPA, impression share, quality score.
+    </p>
+
+    <h3>2.3 LinkedIn performance (<code>data/linkedin_performance.csv</code>)</h3>
+    <p>
+      Weekly rows aligned to LinkedIn Campaign Manager style reporting: impressions,
+      clicks, CTR, spend, leads, CPL, CPC, engagement rate, video views.
+    </p>
+
+    <h3>2.4 Email performance (<code>data/email_performance.csv</code>)</h3>
+    <p>
+      Weekly rows aligned to ESP reporting: sends, delivered, opens, click rates,
+      unsubscribes, attributed conversions and revenue.
+    </p>
+  </div>
+
+  <h2>3. Agent roles</h2>
+  <ul>
+    <li><strong>Google specialist agent</strong> — Reads only the Google CSV (recent
+      tail). Emits JSON: summary, signals, health score, and a suggested weight delta
+      versus baseline.</li>
+    <li><strong>LinkedIn specialist agent</strong> — Same pattern for LinkedIn metrics.</li>
+    <li><strong>Email specialist agent</strong> — Same pattern for email metrics.</li>
+    <li><strong>Supervisor orchestrator agent</strong> — Consumes all three specialist
+      JSON outputs plus the budget table. Performs an explicit
+      <strong>PARA</strong> cycle (Planning, Reasoning, Acting, Reflecting,
+      Adaptation) and outputs recommended USD for each channel for the current week.</li>
+    <li><strong>Reflector agent (optional)</strong> — Second pass that critiques the
+      supervisor output and proposes one alternative allocation that still sums to the
+      weekly total—useful for adaptation and human review.</li>
+  </ul>
+
+  <h2>4. PARA cycle (what the supervisor is asked to do)</h2>
+  <div class="card">
+    <ol>
+      <li><strong>Planning</strong> — Clarify this week’s goals (efficiency, scale,
+        testing, etc.).</li>
+      <li><strong>Reasoning</strong> — Merge the three specialists’ scores and narratives.</li>
+      <li><strong>Acting</strong> — Choose concrete weekly spends for Google, LinkedIn,
+        and Email that sum to the required weekly total.</li>
+      <li><strong>Reflecting</strong> — Surface risks, thin data, and assumptions.</li>
+      <li><strong>Adaptation</strong> — State what to watch next week and how policy
+        would change if signals move.</li>
+    </ol>
+    <p>
+      After the model responds, the Python layer <strong>normalizes</strong> the three
+      dollar amounts so floating-point drift never breaks the constraint
+      <code>google + linkedin + email = weekly_total</code>.
+    </p>
+  </div>
+
+  <h2>5. End-to-end flow (diagram)</h2>
+  <pre class="mermaid">
+flowchart TB
+  subgraph inputs [CSV inputs]
+    B[budget_allocation.csv]
+    G[google_performance.csv]
+    L[linkedin_performance.csv]
+    E[email_performance.csv]
+  end
+
+  subgraph load [Python loader]
+    W["weekly_total = sum(annual)/52"]
+  end
+
+  subgraph agents [OpenAI agents]
+    AG[Google specialist]
+    AL[LinkedIn specialist]
+    AE[Email specialist]
+    S[Supervisor PARA orchestrator]
+    R[Reflector optional]
+  end
+
+  B --> W
+  W --> S
+  G --> AG
+  L --> AL
+  E --> AE
+  AG --> S
+  AL --> S
+  AE --> S
+  S --> N[Normalize weekly spend]
+  N --> OUT[stdout + optional JSON file]
+  S --> R
+  R --> OUT
+  </pre>
+
+  <h2>6. How to run</h2>
+  <pre>pip install -r requirements.txt
+set OPENAI_API_KEY=your_key_here
+python marketing_multi_agent_system.py --data-dir ./data --json-out weekly_allocation.json</pre>
+  <p>
+    Optional: <code>OPENAI_MODEL</code> in the environment overrides the default model.
+    Use <code>--skip-reflection</code> to omit the reflector agent for faster runs.
+  </p>
+
+  <h2>7. Operational notes</h2>
+  <ul>
+    <li><strong>Weekly envelope</strong> — The program assumes a steady weekly burn rate
+      of annual_budget/52. If your finance team uses a custom fiscal calendar, adjust
+      the divisor in code or preprocess the budget CSV.</li>
+    <li><strong>Row window</strong> — Only the most recent rows of each performance file
+      are sent to the model (configurable via <code>max_rows</code> in code) to keep
+      prompts small.</li>
+    <li><strong>Ground truth</strong> — LLM recommendations are not a substitute for
+      platform-specific constraints (minimum spends, pacing, account caps). Treat
+      output as a decision-support starting point.</li>
+  </ul>
+
+  <p style="margin-top:2rem;color:var(--muted);font-size:0.9rem;">
+    Generated documentation for the Multi-Agent Marketing Optimization System.
+  </p>
+</body>
+</html>
